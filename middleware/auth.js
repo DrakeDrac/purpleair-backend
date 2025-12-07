@@ -1,6 +1,17 @@
 const jwt = require('jsonwebtoken');
 
 const authenticateToken = (req, res, next) => {
+  if (process.env.DEV_MODE === 'true') {
+    // Mock user for development
+    req.user = {
+      id: 999,
+      username: 'dev_user',
+      isDev: true
+    };
+    console.log('Dev mode: Authentication bypassed for user dev_user');
+    return next();
+  }
+
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1];
 
@@ -20,4 +31,3 @@ const authenticateToken = (req, res, next) => {
 module.exports = {
   authenticateToken
 };
-

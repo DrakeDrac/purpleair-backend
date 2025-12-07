@@ -26,3 +26,11 @@ Thumbs.db
 dist/
 build/
 
+# Test files
+test.sh
+test.txt
+test.md
+
+
+
+API_DOCUMENTATION.md

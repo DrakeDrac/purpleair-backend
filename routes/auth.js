@@ -6,7 +6,7 @@ const router = express.Router();
 const users = [];
 
 (async () => {
-  const defaultUsername = process.env.DEFAULT_USERNAME || 'admin';
+  const defaultUsername = process.env.DEFAULT_USERNAME || 'admin@myapp.com';
   const defaultPassword = process.env.DEFAULT_PASSWORD || 'admin123';
   
   const hashedPassword = await bcrypt.hash(defaultPassword, 10);
