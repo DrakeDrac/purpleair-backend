@@ -33,7 +33,8 @@ router.get('/search', async (req, res) => {
             latitude: item.latitude,
             longitude: item.longitude,
             country: item.country,
-            admin1: item.admin1 // State/Region
+            admin1: item.admin1, // State/Region
+            timezone: item.timezone || "UTC"
         }));
 
         res.json({ results });
@@ -61,9 +62,12 @@ router.get('/weather', async (req, res) => {
                 latitude: lat,
                 longitude: lon,
                 current: 'temperature_2m,relative_humidity_2m,weather_code,is_day,precipitation,rain,showers,snowfall,apparent_temperature,wind_speed_10m,cloud_cover,visibility',
+                daily: 'temperature_2m_max,temperature_2m_min',
+                forecast_days: 1,
                 temperature_unit: 'fahrenheit',
                 wind_speed_unit: 'mph',
-                precipitation_unit: 'inch'
+                precipitation_unit: 'inch',
+                timezone: 'auto' // Get local time
             }
         });
 
@@ -72,7 +76,8 @@ router.get('/weather', async (req, res) => {
             params: {
                 latitude: lat,
                 longitude: lon,
-                current: 'us_aqi,pm10,pm2_5,uv_index'
+                current: 'us_aqi,pm10,pm2_5,uv_index',
+                timezone: 'auto'
             }
         });
 
@@ -88,7 +93,10 @@ router.get('/weather', async (req, res) => {
         const [weatherRes, aqiRes, geoRes] = await Promise.all([weatherPromise, aqiPromise, geoPromise]);
 
         const wData = weatherRes.data.current;
+        const dData = weatherRes.data.daily;
         const aData = aqiRes.data.current;
+        const wUnits = weatherRes.data.current_units;
+        const dUnits = weatherRes.data.daily_units;
 
         // Map WMO codes to string description
         const weatherCode = wData.weather_code;
@@ -110,19 +118,24 @@ router.get('/weather', async (req, res) => {
                 city: city,
                 latitude: parseFloat(lat),
                 longitude: parseFloat(lon),
-                country: geoRes.data.countryName
+                country: geoRes.data.countryName,
+                timezone: weatherRes.data.timezone,
+                timezone_abbreviation: weatherRes.data.timezone_abbreviation,
+                local_time: wData.time // "YYYY-MM-DDTHH:mm" in local time
             },
             weather: {
-                temperature: `${wData.temperature_2m}F`,
-                feels_like: `${wData.apparent_temperature}F`,
-                humidity: `${wData.relative_humidity_2m}%`,
+                temperature: `${wData.temperature_2m}${wUnits.temperature_2m}`,
+                feels_like: `${wData.apparent_temperature}${wUnits.apparent_temperature}`,
+                humidity: `${wData.relative_humidity_2m}${wUnits.relative_humidity_2m}`,
                 condition: condition,
                 is_day: wData.is_day === 1,
                 precipitation: wData.precipitation,
                 snowfall: wData.snowfall,
-                wind_speed: `${wData.wind_speed_10m} mph`,
-                cloud_cover: `${wData.cloud_cover}%`,
-                visibility: `${wData.visibility} meters`
+                wind_speed: `${wData.wind_speed_10m} ${wUnits.wind_speed_10m}`,
+                cloud_cover: `${wData.cloud_cover}${wUnits.cloud_cover}`,
+                visibility: `${wData.visibility} ${wUnits.visibility}`,
+                temp_max: `${dData.temperature_2m_max[0]}${dUnits.temperature_2m_max}`,
+                temp_min: `${dData.temperature_2m_min[0]}${dUnits.temperature_2m_min}`
             },
             air_quality: {
                 aqi: aData.us_aqi,
