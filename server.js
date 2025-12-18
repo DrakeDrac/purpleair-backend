@@ -28,11 +28,13 @@ const authRoutes = require('./routes/auth');
 const purpleAirRoutes = require('./routes/purpleair');
 const aiRoutes = require('./routes/ai');
 const locationRoutes = require('./routes/location');
+const feedbackRoutes = require('./routes/feedback');
 
 app.use('/api/auth', authRoutes);
 app.use('/api/purpleair', purpleAirRoutes);
 app.use('/api/ai', aiRoutes);
 app.use('/api/location', locationRoutes);
+app.use('/api/feedback', feedbackRoutes);
 
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', message: 'Weather App Backend is running' });
