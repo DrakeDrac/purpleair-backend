@@ -54,15 +54,12 @@ router.get('/weather', async (req, res) => {
             return res.status(400).json({ error: { message: 'lat and lon are required', status: 400 } });
         }
 
-        let weatherData;
-        const normalizedSource = api_source.replace(/\./g, '').toLowerCase();
-
-        if (normalizedSource === 'metno') {
-            weatherData = await fetchMetNoWeather(lat, lon);
-        } else {
-            // Default to OpenMeteo
-            weatherData = await fetchOpenMeteoWeather(lat, lon);
-        }
+        // Prepare promises for all sources
+        const sources = [
+            { id: 'OpenMeteo', promise: fetchOpenMeteoWeather(lat, lon) },
+            { id: 'Met.no', promise: fetchMetNoWeather(lat, lon) },
+            { id: 'PurpleAir', promise: fetchPurpleAirWeather(lat, lon) }
+        ];
 
         // Shared Reverse Geocoding
         const geoPromise = axios.get('https://api.bigdatacloud.net/data/reverse-geocode-client', {
@@ -73,7 +70,49 @@ router.get('/weather', async (req, res) => {
             }
         });
 
-        const [weatherResult, geoRes] = await Promise.all([weatherData, geoPromise]);
+        // Execute all requests in parallel
+        const [results, geoRes] = await Promise.all([
+            Promise.allSettled(sources.map(s => s.promise)),
+            geoPromise
+        ]);
+
+        // Process weather results
+        const sourcesData = [];
+        let mainWeatherData = null;
+
+        results.forEach((result, index) => {
+            const sourceInfo = sources[index];
+            if (result.status === 'fulfilled') {
+                sourcesData.push(result.value);
+            } else {
+                console.error(`${sourceInfo.id} failed:`, result.reason?.message || result.reason);
+                sourcesData.push({
+                    source: sourceInfo.id,
+                    error: 'Failed to fetch data'
+                });
+            }
+        });
+
+        // Determine main source data based on request or default
+        // Normalize input source to match keys (remove dots, lowercase check if needed, but keys are clean here)
+        // Actually our keys are 'OpenMeteo', 'Met.no', 'PurpleAir'
+        // Input 'api_source' might be "Met.no" or "OpenMeteo"
+        // Let's try to find an exact match or fallback
+        const requestedSourceId = sources.find(s => s.id.toLowerCase().replace('.', '') === api_source.toLowerCase().replace('.', ''))?.id || 'OpenMeteo';
+
+        mainWeatherData = sourcesData.find(d => d.source === requestedSourceId && !d.error);
+
+        if (!mainWeatherData) {
+            // If requested fails, try OpenMeteo, then first available
+            mainWeatherData = sourcesData.find(d => d.source === 'OpenMeteo' && !d.error);
+            if (!mainWeatherData) {
+                mainWeatherData = sourcesData.find(d => !d.error);
+            }
+        }
+
+        if (!mainWeatherData) {
+            throw new Error('All weather sources failed');
+        }
 
         const city = geoRes.data.city || geoRes.data.locality || geoRes.data.principalSubdivision || "Unknown Location";
 
@@ -83,11 +122,12 @@ router.get('/weather', async (req, res) => {
                 latitude: parseFloat(lat),
                 longitude: parseFloat(lon),
                 country: geoRes.data.countryName,
-                ...weatherResult.location
+                ...mainWeatherData.location
             },
-            weather: weatherResult.weather,
-            air_quality: weatherResult.air_quality,
-            source: weatherResult.source
+            weather: mainWeatherData.weather,
+            air_quality: mainWeatherData.air_quality,
+            source: mainWeatherData.source,
+            sources_data: sourcesData
         };
 
         res.json(result);
@@ -98,12 +138,58 @@ router.get('/weather', async (req, res) => {
     }
 });
 
+// 4. Get Weather by Specific PurpleAir Sensor ID
+router.get('/weather/purpleair/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+
+        if (!id) {
+            return res.status(400).json({ error: { message: 'Sensor ID is required', status: 400 } });
+        }
+
+        const sensorData = await fetchPurpleAirSensorById(id);
+
+        // Perform reverse geocoding for the sensor location
+        const geoRes = await axios.get('https://api.bigdatacloud.net/data/reverse-geocode-client', {
+            params: {
+                latitude: sensorData.location.latitude,
+                longitude: sensorData.location.longitude,
+                localityLanguage: 'en'
+            }
+        });
+
+        const city = geoRes.data.city || geoRes.data.locality || geoRes.data.principalSubdivision || "Unknown Location";
+
+        const result = {
+            location: {
+                city: city,
+                latitude: sensorData.location.latitude,
+                longitude: sensorData.location.longitude,
+                country: geoRes.data.countryName,
+                ...sensorData.location
+            },
+            weather: sensorData.weather,
+            air_quality: sensorData.air_quality,
+            source: sensorData.source,
+            sources_data: [sensorData] // Only one source for this specific route
+        };
+
+        res.json(result);
+
+    } catch (error) {
+        console.error('PurpleAir sensor error:', error.message);
+        const status = error.response?.status || 500;
+        res.status(status).json({ error: { message: error.message || 'Failed to fetch sensor data', status: status } });
+    }
+});
+
 // 3. Get Available API Sources
 router.get('/sources', (req, res) => {
     res.json({
         sources: [
             { id: 'OpenMeteo', name: 'Open-Meteo (Default)' },
-            { id: 'Met.no', name: 'Met.no (Yr.no)' }
+            { id: 'Met.no', name: 'Met.no (Yr.no)' },
+            { id: 'PurpleAir', name: 'PurpleAir (Local Sensors)' }
         ]
     });
 });
@@ -187,6 +273,7 @@ async function fetchOpenMeteoWeather(lat, lon) {
     };
 }
 
+
 async function fetchMetNoWeather(lat, lon) {
     // Met.no requires User-Agent
     const response = await axios.get('https://api.met.no/weatherapi/locationforecast/2.0/compact', {
@@ -259,6 +346,217 @@ async function fetchMetNoWeather(lat, lon) {
         },
         source: "Met.no"
     };
+}
+
+async function fetchPurpleAirWeather(lat, lon) {
+    const apiKey = process.env.PURPLEAIR_API_KEY;
+    if (!apiKey) {
+        throw new Error('PurpleAir API Key missing');
+    }
+
+
+    // Define bounding box (approx +/- 0.5 degrees)
+    // 1 deg lat ~ 69 miles, 0.5 deg ~ 35 miles radius rough box
+    const radiusDeg = 0.2; // Smaller radius to reduce data load, maybe 0.2 (~14 miles)
+    const nwlat = parseFloat(lat) + radiusDeg;
+    const nwlng = parseFloat(lon) - radiusDeg;
+    const selat = parseFloat(lat) - radiusDeg;
+    const selng = parseFloat(lon) + radiusDeg;
+
+    const response = await axios.get('https://api.purpleair.com/v1/sensors', {
+        headers: {
+            'X-API-Key': apiKey
+        },
+        params: {
+            fields: 'name,latitude,longitude,temperature,humidity,pm2.5_atm',
+            nwlat: nwlat,
+            nwlng: nwlng,
+            selat: selat,
+            selng: selng,
+            location_type: 0 // Outside sensors only
+        }
+    });
+
+    const data = response.data;
+    if (!data.data || data.data.length === 0) {
+        throw new Error('No PurpleAir sensors found in area');
+    }
+
+    // Fields indices
+    const fields = data.fields; // ["latitude", "longitude", "name", ...]
+    const idxLat = fields.indexOf('latitude');
+    const idxLon = fields.indexOf('longitude');
+    const idxName = fields.indexOf('name');
+    const idxTemp = fields.indexOf('temperature');
+    const idxHum = fields.indexOf('humidity');
+    const idxPm25 = fields.indexOf('pm2.5_atm');
+
+    // Find closest sensor
+    let minDist = Infinity;
+    let closestSensor = null;
+
+    for (const sensor of data.data) {
+        const sLat = sensor[idxLat];
+        const sLon = sensor[idxLon];
+        if (sLat === null || sLon === null) continue;
+
+        const dist = getDistanceFromLatLonInKm(lat, lon, sLat, sLon);
+        if (dist < minDist) {
+            minDist = dist;
+            closestSensor = sensor;
+        }
+    }
+
+    if (!closestSensor) {
+        throw new Error('No valid PurpleAir sensors found');
+    }
+
+    // Format data
+    const tempF = closestSensor[idxTemp];
+    const humidity = closestSensor[idxHum];
+    const pm25 = closestSensor[idxPm25];
+
+    // Calculate AQI from PM2.5
+    const aqi = calculateUS_AQI(pm25);
+
+    // Condition estimation (PurpleAir only gives basic data, so we guess based on humidity/temp or just say "Unknown" or "Clear")
+    // Actually, we can't really know if it's raining from just temp/humidity/pm2.5 easily.
+    // We'll leave condition as "N/A" or "Unknown" or maybe just assume "Clear" if no other info.
+    // Better to state "Observed" or "N/A".
+    const condition = "N/A";
+
+    return {
+        location: {
+            timezone: "Local",
+            timezone_abbreviation: "LCL",
+            local_time: new Date().toISOString() // PurpleAir doesn't give local time, use server/client time or approx
+        },
+        weather: {
+            temperature: `${tempF}°F`,
+            feels_like: `${tempF}°F`, // No wind/sun data for heat index
+            humidity: `${humidity}%`,
+            condition: condition,
+            is_day: true, // Placeholder
+            precipitation: 0,
+            snowfall: 0,
+            wind_speed: "N/A",
+            cloud_cover: "N/A",
+            visibility: "N/A",
+            temp_max: "N/A",
+            temp_min: "N/A"
+        },
+        air_quality: {
+            aqi: aqi,
+            pm2_5: pm25,
+            pm10: "N/A",
+            uv_index: "N/A"
+        },
+        source: `PurpleAir (${closestSensor[idxName]})`
+    };
+}
+
+async function fetchPurpleAirSensorById(sensorIndex) {
+    const apiKey = process.env.PURPLEAIR_API_KEY;
+    if (!apiKey) {
+        throw new Error('PurpleAir API Key missing');
+    }
+
+    const response = await axios.get(`https://api.purpleair.com/v1/sensors/${sensorIndex}`, {
+        headers: {
+            'X-API-Key': apiKey
+        },
+        params: {
+            fields: 'name,latitude,longitude,temperature,humidity,pm2.5_atm'
+        }
+    });
+
+    const data = response.data;
+    if (!data.sensor) {
+        throw new Error('Sensor data not found');
+    }
+
+    const sensor = data.sensor;
+
+    // Log the sensor keys for debugging
+    console.log('PurpleAir Sensor Data:', Object.keys(sensor));
+
+    // Calculate AQI
+    // Note: Field name usually has a dot e.g. "pm2.5_atm"
+    const pm25 = sensor['pm2.5_atm'] || sensor.pm2_5_atm || 0;
+    const aqi = calculateUS_AQI(pm25);
+    const condition = "N/A"; // Or infer from AQI?
+
+    return {
+        location: {
+            timezone: "Local",
+            timezone_abbreviation: "LCL",
+            local_time: new Date().toISOString(),
+            latitude: sensor.latitude,
+            longitude: sensor.longitude
+        },
+        weather: {
+            temperature: `${sensor.temperature}°F`,
+            feels_like: `${sensor.temperature}°F`,
+            humidity: `${sensor.humidity}%`,
+            condition: condition,
+            is_day: true, // Placeholder
+            precipitation: 0,
+            snowfall: 0,
+            wind_speed: "N/A",
+            cloud_cover: "N/A",
+            visibility: "N/A",
+            temp_max: "N/A",
+            temp_min: "N/A"
+        },
+        air_quality: {
+            aqi: aqi,
+            pm2_5: pm25,
+            pm10: "N/A",
+            uv_index: "N/A"
+        },
+        source: `PurpleAir (${sensor.name})`,
+        // Include raw data for consistency if needed, but structure above covers main parts
+    };
+}
+
+function getDistanceFromLatLonInKm(lat1, lon1, lat2, lon2) {
+    var R = 6371; // Radius of the earth in km
+    var dLat = deg2rad(lat2 - lat1);  // deg2rad below
+    var dLon = deg2rad(lon2 - lon1);
+    var a =
+        Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+        Math.cos(deg2rad(lat1)) * Math.cos(deg2rad(lat2)) *
+        Math.sin(dLon / 2) * Math.sin(dLon / 2)
+        ;
+    var c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    var d = R * c; // Distance in km
+    return d;
+}
+
+function deg2rad(deg) {
+    return deg * (Math.PI / 180)
+}
+
+function calculateUS_AQI(pm25) {
+    if (pm25 < 0) return 0;
+    if (pm25 > 500.4) return 500; // Cap
+
+    const breakpoints = [
+        { cLow: 0.0, cHigh: 12.0, iLow: 0, iHigh: 50 },
+        { cLow: 12.1, cHigh: 35.4, iLow: 51, iHigh: 100 },
+        { cLow: 35.5, cHigh: 55.4, iLow: 101, iHigh: 150 },
+        { cLow: 55.5, cHigh: 150.4, iLow: 151, iHigh: 200 },
+        { cLow: 150.5, cHigh: 250.4, iLow: 201, iHigh: 300 },
+        { cLow: 250.5, cHigh: 350.4, iLow: 301, iHigh: 400 },
+        { cLow: 350.5, cHigh: 500.4, iLow: 401, iHigh: 500 }
+    ];
+
+    const bp = breakpoints.find(b => pm25 >= b.cLow && pm25 <= b.cHigh);
+    if (!bp) return 500; // Should be caught by cap or falls in gaps? (Gaps shouldn't exist ideally but floating point)
+
+    return Math.round(
+        ((bp.iHigh - bp.iLow) / (bp.cHigh - bp.cLow)) * (pm25 - bp.cLow) + bp.iLow
+    );
 }
 
 module.exports = router;
