@@ -178,8 +178,24 @@ router.get('/weather/purpleair/:id', async (req, res) => {
 
     } catch (error) {
         console.error('PurpleAir sensor error:', error.message);
-        const status = error.response?.status || 500;
-        res.status(status).json({ error: { message: error.message || 'Failed to fetch sensor data', status: status } });
+
+        if (error.response) {
+            const status = error.response.status;
+            let message = 'Failed to fetch sensor data';
+
+            if (status === 404) {
+                message = 'Sensor not found on PurpleAir. Please check the ID.';
+            } else if (status === 403 || status === 401) {
+                message = 'PurpleAir API access denied. Please check server configuration.';
+            } else if (status === 400) {
+                message = 'Invalid request to PurpleAir API.';
+            }
+
+            return res.status(status).json({ error: { message: message, status: status } });
+        }
+
+        // Handle other errors (e.g. network, coding)
+        res.status(500).json({ error: { message: error.message || 'Internal Server Error', status: 500 } });
     }
 });
 
@@ -466,7 +482,7 @@ async function fetchPurpleAirSensorById(sensorIndex) {
             'X-API-Key': apiKey
         },
         params: {
-            fields: 'name,latitude,longitude,temperature,humidity,pm2.5_atm'
+            fields: 'name,latitude,longitude,temperature,humidity,pm2.5_atm,pm10.0_atm'
         }
     });
 
@@ -483,6 +499,7 @@ async function fetchPurpleAirSensorById(sensorIndex) {
     // Calculate AQI
     // Note: Field name usually has a dot e.g. "pm2.5_atm"
     const pm25 = sensor['pm2.5_atm'] || sensor.pm2_5_atm || 0;
+    const pm10 = sensor['pm10.0_atm'] || sensor.pm10_0_atm || "N/A";
     const aqi = calculateUS_AQI(pm25);
     const condition = "N/A"; // Or infer from AQI?
 
@@ -511,7 +528,7 @@ async function fetchPurpleAirSensorById(sensorIndex) {
         air_quality: {
             aqi: aqi,
             pm2_5: pm25,
-            pm10: "N/A",
+            pm10: pm10,
             uv_index: "N/A"
         },
         source: `PurpleAir (${sensor.name})`,
